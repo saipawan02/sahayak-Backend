@@ -74,3 +74,19 @@ async def upload_pdf(
     except Exception as e:
         print(f"Error uploading PDF: {e}")
         raise HTTPException(status_code=500, detail=f"Error uploading PDF: {e}")
+
+@router.get("/list_files/")
+async def list_files(
+    teacher_name: str = Query(..., description="Name of the teacher."),
+    grade: str = Query(..., description="Grade level."),
+    subject: str = Query(..., description="Subject name.")
+):
+    """Lists all files in a given directory of the GCS bucket."""
+    try:
+        prefix = f"{teacher_name}/{grade}/{subject}/"
+        blobs = bucket.list_blobs(prefix=prefix)
+        file_list = [blob.name.split("/")[-1] for blob in blobs]
+        return {"files": file_list}
+    except Exception as e:
+        print(f"Error listing files: {e}")
+        raise HTTPException(status_code=500, detail=f"Error listing files: {e}")

@@ -10,4 +10,5 @@ google-cloud-storage
 google-cloud-aiplatform
 google-generativeai
 pymupdf
-python-multipart
+python-multipartgoogle-cloud-translate==3.13.0
+google-cloud-translate
