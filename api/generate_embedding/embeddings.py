@@ -1,26 +1,28 @@
 import os
 from fastapi import APIRouter, HTTPException
 import vertexai
-from vertexai.vision_models import MultiModalEmbeddingModel, Video
+from vertexai.vision_models import MultiModalEmbeddingModel, Video, Image
 from google.cloud import aiplatform_v1, storage
 from google.cloud.aiplatform.matching_engine import matching_engine_index_endpoint
 from dotenv import load_dotenv
-import fitz # PyMuPDF
+import fitz  # PyMuPDF
 import io
 from google.cloud import aiplatform
 import traceback
+import json
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 load_dotenv()
 
 router = APIRouter()
 
-# --- Configuration --- 
+# --- Configuration ---
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT_ID")
 REGION = os.getenv("VERTEX_AI_LOCATION")
 BUCKET_NAME = os.getenv("GOOGLE_CLOUD_BUCKET_NAME")
 
-if not all([PROJECT_ID, REGION]):
-    raise ValueError("Missing required environment variables for Google Cloud or Vertex AI Location.")
+if not all([PROJECT_ID, REGION, BUCKET_NAME]):
+    raise ValueError("Missing required environment variables.")
 
 # --- Initialize Vertex AI and Google Cloud Storage ---
 vertexai.init(project=PROJECT_ID, location=REGION)
@@ -29,208 +31,174 @@ storage_client = storage.Client()
 # Load the multimodal embedding model
 embedding_model = MultiModalEmbeddingModel.from_pretrained("multimodalembedding@001")
 
+
 def get_multimodal_embeddings_from_video(video_uri: str, interval_sec: int = 16):
-    """
-    Generates multimodal embeddings from a video stored in GCS.
-    """
+    """Generates multimodal embeddings from a video stored in GCS."""
     try:
         video = Video.from_uri(video_uri)
-
-        video_duration = int(video.duration) if video.duration is not None else None
-
-        if video_duration is None:
-             print("Warning: Video duration not available. Using a default end offset.")
-             end_offset = 3600 # Default to 1 hour if duration is unknown
-        else:
-             end_offset = video_duration
+        video_duration = int(video.duration) if video.duration is not None else 3600
 
         embeddings_response = embedding_model.get_embeddings(
             video=video,
             video_segment_config=aiplatform_v1.types.VideoSegmentConfig(
                 start_offset_sec=0,
-                end_offset_sec=end_offset,
-                interval_sec=interval_sec
-            )
+                end_offset_sec=video_duration,
+                interval_sec=interval_sec,
+            ),
         )
         print(f"Generated {len(embeddings_response.video_embeddings)} video embeddings.")
-        # Return embeddings and start/end offsets for creating unique IDs
-        return [(ve.embedding, ve.start_offset_sec, ve.end_offset_sec) for ve in embeddings_response.video_embeddings]
-
+        return [
+            (ve.embedding, f"video_segment_{ve.start_offset_sec}_{ve.end_offset_sec}")
+            for ve in embeddings_response.video_embeddings
+        ]
     except Exception as e:
         print(f"Error generating multimodal embeddings from video: {e}")
         return []
 
+
 def get_multimodal_embeddings_from_pdf(pdf_uri: str):
-    """
-    Generates multimodal embeddings from a PDF stored in GCS.
-    Extracts text page by page and generates embeddings.
-    """
-    pdf_embeddings_with_offsets = []
+    """Generates multimodal embeddings from both text and images in a PDF stored in GCS."""
+    embeddings_with_ids = []
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1023,
+        chunk_overlap=200)
     try:
-        # Parse GCS URI
-        from urllib.parse import urlparse
-        parsed_uri = urlparse(pdf_uri)
-        bucket_name = parsed_uri.netloc
-        blob_name = parsed_uri.path.lstrip('/')
-
-        if not bucket_name or not blob_name:
-             print(f"Invalid GCS PDF URI: {pdf_uri}")
-             return []
-
+        bucket_name, blob_name = pdf_uri.replace("gs://", "").split("/", 1)
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
-
-        # Download PDF content into memory
         pdf_content = blob.download_as_bytes()
 
-        # Open PDF with PyMuPDF
         pdf_document = fitz.open(stream=pdf_content, filetype="pdf")
-
         print(f"Processing PDF with {pdf_document.page_count} pages.")
 
-        # Iterate through pages and generate embeddings
         for page_num in range(pdf_document.page_count):
             page = pdf_document.load_page(page_num)
-            page_img = page.get_images(full=True)
-            page_text = page.get_text()
+            page_text = page.get_text().strip()
 
-            if not page_text.strip():
-                 print(f"Skipping empty page {page_num + 1}.")
-                 continue
+            # Embed text chunks
+            if page_text:
+                text_chunks = text_splitter.split_text(page_text)
+                for i, chunk in enumerate(text_chunks):
+                    try:
+                        text_response = embedding_model.get_embeddings(
+                            contextual_text=chunk
+                        )
+                        if text_response.text_embedding:
+                            embeddings_with_ids.append(
+                                (
+                                    text_response.text_embedding,
+                                    f"page_{page_num + 1}_text_chunk_{i + 1}",
+                                )
+                            )
+                            print(
+                                f"Generated text embedding for page {page_num + 1}, chunk {i + 1}."
+                            )
+                    except Exception as e:
+                        print(
+                            f"Could not generate text embedding for page {page_num + 1}, chunk {i + 1}: {e}"
+                        )
 
-            try:
-                # Generate embedding for the page text
-                # The multimodal model can embed text input as well
-
-                for img in page_img:
-                    embeddings_response = embedding_model.get_embeddings(
-                        image= img,
-                        contextual_text=page_text,
+            # Embed images
+            for img_index, img in enumerate(page.get_images(full=True)):
+                xref = img[0]
+                base_image = pdf_document.extract_image(xref)
+                image_bytes = base_image["image"]
+                try:
+                    image = Image(image_bytes=image_bytes)
+                    image_response = embedding_model.get_embeddings(image=image)
+                    if image_response.image_embedding:
+                        embeddings_with_ids.append(
+                            (
+                                image_response.image_embedding,
+                                f"page_{page_num + 1}_image_{img_index + 1}",
+                            )
+                        )
+                        print(
+                            f"Generated image embedding for page {page_num + 1}, image {img_index + 1}."
+                        )
+                except Exception as e:
+                    print(
+                        f"Could not generate image embedding for page {page_num + 1}, image {img_index + 1}: {e}"
                     )
-                    text_embedding = embeddings_response.text_embeddings
-                    image_embeddings = embeddings_response.image_embedding
-
-                    # Store embedding with page number as offset information
-                    # Using page_num as start_offset and page_num + 1 as end_offset conceptually
-                    pdf_embeddings_with_offsets.append((text_embedding, page_num, page_num + 1))
-                    pdf_embeddings_with_offsets.append((image_embeddings, page_num, page_num + 1))
-                    print(f"Generated embedding for page {page_num + 1}.")
-
-            except Exception as e:
-                print(f"Error generating embedding for PDF page {page_num + 1}: {e}")
-                # print(traceback.print_exc())
-                # Continue processing other pages even if one fails
 
         pdf_document.close()
-        print(f"Generated {len(pdf_embeddings_with_offsets)} PDF embeddings.")
-        return pdf_embeddings_with_offsets
-
+        return embeddings_with_ids
     except Exception as e:
         print(f"Error processing PDF from GCS: {e}")
         return []
 
+
 @router.post("/generate_embedding/")
 async def generate_embedding(teacher: str, grade: str, subject: str, file_name: str):
-    """Generates multimodal embeddings for a file (video or PDF) and stores them in the appropriate Vertex AI Vector Search index based on teacher, grade, and subject.
-
-    Args:
-        teacher: The teacher's name.
-        grade: The grade level.
-        subject: The subject.
-        file_name: file name along with extension
+    """
+    Generates multimodal embeddings for a file and directly upserts them
+    into the corresponding Vertex AI Vector Search index.
     """
     if not all([teacher, grade, subject, file_name]):
-        raise HTTPException(status_code=400, detail="teacher, grade, subject and file_name must be provided.")
+        raise HTTPException(
+            status_code=400,
+            detail="teacher, grade, subject, and file_name must be provided.",
+        )
 
     try:
+        teacher_clean = teacher.replace(" ", "_").lower()
         object_path = f"{teacher}/{grade}/{subject}/{file_name}"
         file_uri = f"gs://{BUCKET_NAME}/{object_path}"
 
-        # Construct the expected index display name
-        teacher = teacher.replace(' ', '_').lower()
-        index_display_name = f"{teacher}_{grade}_{subject}_index"
-
-        # Find the index with the matching display name
-        indexes = aiplatform.MatchingEngineIndex.list(filter=f'display_name="{index_display_name}"')
-
-        if not indexes:
-            raise HTTPException(status_code=404, detail=f"Index with display name '{index_display_name}' not found. Please create the index first.")
-
-        # Assuming there's only one index with this display name
-        index = indexes[0]
-
-        # Find a deployed endpoint for the index
-        if not index.deployed_indexes:
-             raise HTTPException(status_code=404, detail=f"No deployed endpoint found for index '{index_display_name}'. Please deploy the index first.")
-
-        # Assuming the first deployed index is the one we want to use
-        # deployed_index_id = index.deployed_indexes[0].id
-        # index_endpoint_name = index.deployed_indexes[0].index_endpoint
-
-        index_endpoint_name = f"{teacher}_{grade}_{subject}_deployed_index"
-        print(f"Index Endpoint name: {index_endpoint_name}")
-
-        # Determine file type based on extension
-        file_extension = file_name.split(".")[-1]
-        print(f"File extension detected: {file_extension}")
-
-        embeddings_with_offsets = []
+        file_extension = file_name.split(".")[-1].lower()
+        embeddings_with_ids = []
 
         if file_extension == "mp4":
-            print(f"Processing video file: {file_uri}")
-            embeddings_with_offsets = get_multimodal_embeddings_from_video(file_uri, interval_sec=16)
+            embeddings_with_ids = get_multimodal_embeddings_from_video(
+                file_uri, interval_sec=16
+            )
         elif file_extension == "pdf":
-            print(f"Processing PDF file: {file_uri}")
-            embeddings_with_offsets = get_multimodal_embeddings_from_pdf(file_uri)
+            embeddings_with_ids = get_multimodal_embeddings_from_pdf(file_uri)
         else:
-            raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_extension}. Only .mp4 and .pdf are supported.")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type: {file_extension}. Only .mp4 and .pdf are supported.",
+            )
 
-        if not embeddings_with_offsets:
-             raise HTTPException(status_code=500, detail=f"Failed to generate embeddings for {file_uri}. No embeddings were generated.")
+        if not embeddings_with_ids:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to generate any embeddings for {file_uri}.",
+            )
 
-        # Prepare data for indexing
-        item_id_prefix = f"{teacher}_{grade}_{subject}"
+        # 1. Find the corresponding Index Endpoint
+        endpoint_display_name = f"{teacher_clean}_{grade}_{subject}_index"
+        indexes = aiplatform.MatchingEngineIndexEndpoint.list(filter=f'display_name="{endpoint_display_name}"')
+        index_endpoint = indexes[0]
+
+
+        # 2. Prepare datapoints for upserting
         datapoints = []
-        for i, (embedding, start_offset, end_offset) in enumerate(embeddings_with_offsets):
-             # Create a unique ID for each datapoint (file segment or page)
-             # Include both offsets for clarity and uniqueness
-             datapoint_id = f"{item_id_prefix}_{start_offset}_{end_offset}"
-             datapoints.append(
-                 aiplatform_v1.IndexDatapoint(
-                     datapoint_id=datapoint_id,
-                     feature_vector=embedding,
-                     # Add restrictions or crowding tags here if needed
-                     # For example, add a restriction based on file type or original URI
-                     # rest={'uri': file_uri, 'file_type': file_extension}
-                 )
-             )
+        file_name_sanitized = "".join(c for c in file_name if c.isalnum() or c in "._-")
+        for embedding, unique_id_part in embeddings_with_ids:
+            datapoint_id = f"{file_name_sanitized}_{unique_id_part}"
+            datapoints.append(
+                aiplatform_v1.IndexDatapoint(
+                    datapoint_id=datapoint_id,
+                    feature_vector=embedding,
+                )
+            )
 
-        if not datapoints:
-             raise HTTPException(status_code=500, detail="No datapoints prepared for indexing.")
-
-        # 3. Upsert embeddings to the index
-        print(f"Upserting {len(datapoints)} datapoints to deployed index '{deployed_index_id}'...")
-
-        
-        # Initialize the deployed index endpoint
-        deployed_index_endpoint = matching_engine_index_endpoint.MatchingEngineIndexEndpoint(
-            index_endpoint_name=index_endpoint_name,
-            project=PROJECT_ID,
-            location=REGION
-        )
-
-        # The upsert_embeddings method expects a list of IndexDatapoint objects or dicts
-        deployed_index_endpoint.upsert_embeddings(datapoints)
+        # 3. Upsert embeddings to the Vector Search index
+        print(f"Upserting {len(datapoints)} datapoints to endpoint {index_endpoint.resource_name}...")
+        index_endpoint.upsert_datapoints(datapoints=datapoints)
         print("Upsert operation initiated.")
 
-
-        return {"message": f"Embeddings generated and upserted to Vector Search index endpoint '{index_endpoint_name}'.",
-                "num_embeddings": len(datapoints),
-                "file_type": file_extension,
-                "index_display_name": index_display_name}
+        return {
+            "message": f"Successfully initiated upsert of {len(datapoints)} embeddings to Vector Search.",
+            "index_endpoint_name": index_endpoint.resource_name,
+            "num_embeddings": len(datapoints),
+        }
 
     except Exception as e:
         print(f"Detailed error in /generate_embedding/: {e}")
-
-        print(traceback.print_stack())
-        raise HTTPException(status_code=500, detail=f"An error occurred during embedding generation and upsert: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"An error occurred: {e}",
+        )
