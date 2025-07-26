@@ -1,5 +1,12 @@
 pip
 autopep8
-Flask==3.0.3
+fastapi
 gunicorn==22.0.0
 Werkzeug==3.0.6
+fastapi
+uvicorn
+python-dotenv
+google-cloud-storage
+google-cloud-aiplatform
+google-generativeai
+pymupdf
