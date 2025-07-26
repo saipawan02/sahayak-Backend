@@ -14,13 +14,10 @@ router = APIRouter()
 # --- Configuration --- 
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT_ID")
 REGION = os.getenv("VERTEX_AI_LOCATION")
-VECTOR_STORE_INDEX_ID = os.getenv("VERTEX_AI_INDEX_ID")
-VECTOR_STORE_ENDPOINT_ID = os.getenv("VERTEX_AI_ENDPOINT_ID")
-DEPLOYED_INDEX_ID = VECTOR_STORE_ENDPOINT_ID
 gemini_api_key = os.getenv("GEMINI_API_KEY")
 BUCKET_NAME = os.getenv("GOOGLE_CLOUD_BUCKET_NAME") # Get bucket name for retrieval
 
-if not all([PROJECT_ID, REGION, VECTOR_STORE_INDEX_ID, VECTOR_STORE_ENDPOINT_ID, gemini_api_key, BUCKET_NAME]):
+if not all([PROJECT_ID, REGION, gemini_api_key, BUCKET_NAME]):
     raise ValueError("Missing required environment variables for Google Cloud, Vertex AI, or Gemini.")
 
 # --- Initialize Vertex AI, Gemini, and Google Cloud Storage ---
@@ -29,14 +26,7 @@ genai.configure(api_key=gemini_api_key)
 storage_client = storage.Client() # Initialize storage client for retrieval
 bucket = storage_client.bucket(BUCKET_NAME) # Get bucket for retrieval
 
-# Get the deployed index endpoint
-try:
-    deployed_index_endpoint = matching_engine_index_endpoint.MatchingEngineIndexEndpoint(
-        index_endpoint_name=f"projects/{PROJECT_ID}/locations/{REGION}/indexEndpoints/{VECTOR_STORE_ENDPOINT_ID}"
-    )
-except Exception as e:
-    print(f"Error initializing MatchingEngineIndexEndpoint: {e}")
-    deployed_index_endpoint = None # Handle case where endpoint initialization fails
+deployed_index_endpoint = None # Handle case where endpoint initialization fails
 
 # Load the multimodal embedding model for query embedding
 embedding_model = MultiModalEmbeddingModel.from_pretrained("multimodalembedding@001")

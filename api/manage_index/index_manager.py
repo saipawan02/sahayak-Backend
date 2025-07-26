@@ -32,7 +32,7 @@ def create_index_endpoint(display_name: str):
         print(f"Error creating Index Endpoint: {e}")
         raise e
 
-def deploy_index_to_endpoint(index: aiplatform.MatchingEngineIndex, index_endpoint: aiplatform.IndexEndpoint, deployed_index_id: str):
+def deploy_index_to_endpoint(index: aiplatform.MatchingEngineIndex, index_endpoint: aiplatform.MatchingEngineIndexEndpoint, deployed_index_id: str):
     """Deploys a Vertex AI Vector Search Index to an Index Endpoint."""
     try:
         operation = index_endpoint.deploy_index(
@@ -63,25 +63,16 @@ def _create_and_deploy_index_task(
         # 1. Create the index
         index_display_name = f"{teacher}_{grade}_{subject}_index"
         print(f"Background task: Initiating creation of index: {index_display_name}")
-        index_operation = aiplatform.MatchingEngineIndex.create_from_metadata(
-            index_config=aiplatform.MatchingEngineIndexConfig(
-                display_name=index_display_name,
-                version_aliases=['default'],
-                description=description,
-                machine_type='e2-highmem-16',
-                tree_ah_config=aiplatform.MatchingEngineIndexConfig.TreeAhConfig(
-                    leaf_node_embedding_count=500,
-                    leaf_nodes_to_search_percent=10,
-                ),
-                dimensions=dimensions,
-                approximate_neighbors_count=100,
-                distance_measure_type=distance_measure_type,
-                embedding_storage=
-                    aiplatform.MatchingEngineEmbeddingStorageConfig.create_with_format(
-                        aiplatform.MatchingEngineEmbeddingStorageConfig.DataFormat.JSON,
-                    ) if contents_delta_uri else None,
-            ),
-            contents_delta_uri=contents_delta_uri if contents_delta_uri else None,
+        index_operation = aiplatform.MatchingEngineIndex.create_tree_ah_index(
+            display_name=endpoint_display_name,
+            contents_delta_uri=contents_delta_uri,
+            description="Matching Engine Index",
+            dimensions=100,
+            approximate_neighbors_count=150,
+            leaf_node_embedding_count=500,
+            leaf_nodes_to_search_percent=7,
+            index_update_method="BATCH_UPDATE",  # Options: STREAM_UPDATE, BATCH_UPDATE
+            distance_measure_type=aiplatform.matching_engine.matching_engine_index_config.DistanceMeasureType.DOT_PRODUCT_DISTANCE,
         )
         print(f"Background task: Index creation operation name: {index_operation.operation.name}")
 
@@ -137,15 +128,18 @@ async def create_index(
     teacher: str,
     grade: str,
     subject: str,
-    dimensions: int,
     background_tasks: BackgroundTasks, # Inject BackgroundTasks
+    dimensions: int = 1408,
     distance_measure_type: str = "DOT_PRODUCT_DENORMALIZE",
     contents_delta_uri: str = None,
     description: str = None,
-    endpoint_display_name: str = "default-index-endpoint"
 ):
     """Initiates the creation and deployment of a Vertex AI Vector Search index as a background task."""
     print("Received request to create and deploy index.")
+
+    teacher = teacher.replace(' ', '_')
+    endpoint_display_name = f"{teacher}_{grade}_{subject}_index"
+
     # Add the task to the background
     background_tasks.add_task(
         _create_and_deploy_index_task,
@@ -209,6 +203,7 @@ async def check_index_endpoint_status(teacher: str, grade: str, subject: str):
     """Checks the status of the Vertex AI Vector Search Index Endpoint associated with a teacher, grade, and subject."""
     try:
         # Construct the expected index display name to find the associated endpoint
+        teacher = teacher.replace(' ', '_')
         index_display_name = f"{teacher}_{grade}_{subject}_index"
 
         # Find the index first to get the associated endpoint name
