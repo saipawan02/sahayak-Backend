@@ -15,25 +15,13 @@ router = APIRouter()
 # --- Configuration --- 
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT_ID")
 REGION = os.getenv("VERTEX_AI_LOCATION")
-VECTOR_STORE_INDEX_ID = os.getenv("VERTEX_AI_INDEX_ID")
-VECTOR_STORE_ENDPOINT_ID = os.getenv("VERTEX_AI_ENDPOINT_ID")
-DEPLOYED_INDEX_ID = VECTOR_STORE_ENDPOINT_ID
 
-if not all([PROJECT_ID, REGION, VECTOR_STORE_INDEX_ID, VECTOR_STORE_ENDPOINT_ID]):
-    raise ValueError("Missing required environment variables for Google Cloud or Vertex AI Vector Search.")
+if not all([PROJECT_ID, REGION]):
+    raise ValueError("Missing required environment variables for Google Cloud or Vertex AI Location.")
 
 # --- Initialize Vertex AI and Google Cloud Storage ---
 vertexai.init(project=PROJECT_ID, location=REGION)
 storage_client = storage.Client()
-
-# Get the deployed index endpoint
-try:
-    deployed_index_endpoint = matching_engine_index_endpoint.MatchingEngineIndexEndpoint(
-        index_endpoint_name=f"projects/{PROJECT_ID}/locations/{REGION}/indexEndpoints/{VECTOR_STORE_ENDPOINT_ID}"
-    )
-except Exception as e:
-    print(f"Error initializing MatchingEngineIndexEndpoint: {e}")
-    deployed_index_endpoint = None # Handle case where endpoint initialization fails
 
 # Load the multimodal embedding model
 embedding_model = MultiModalEmbeddingModel.from_pretrained("multimodalembedding@001")
@@ -130,22 +118,45 @@ def get_multimodal_embeddings_from_pdf(pdf_uri: str):
         return []
 
 @router.post("/generate_embedding/")
-async def generate_embedding(file_uri: str, item_id_prefix: str):
-    """Generates multimodal embeddings for a file (video or PDF) and stores them in Vertex AI Vector Search.
+async def generate_embedding(teacher: str, grade: str, subject: str, file_uri: str, item_id_prefix: str):
+    """Generates multimodal embeddings for a file (video or PDF) and stores them in the appropriate Vertex AI Vector Search index based on teacher, grade, and subject.
 
     Args:
+        teacher: The teacher's name.
+        grade: The grade level.
+        subject: The subject.
         file_uri: Google Cloud Storage URI of the file (e.g., "gs://your-bucket/your-file.mp4" or "gs://your-bucket/your-document.pdf").
         item_id_prefix: A prefix for the unique ID of each file segment for indexing.
     """
-    if not file_uri:
-        raise HTTPException(status_code=400, detail="file_uri must be provided.")
-    if not item_id_prefix:
-        raise HTTPException(status_code=400, detail="item_id_prefix must be provided.")
-
-    if deployed_index_endpoint is None:
-         raise HTTPException(status_code=500, detail="Vertex AI Vector Search endpoint not initialized.")
+    if not all([teacher, grade, subject, file_uri, item_id_prefix]):
+        raise HTTPException(status_code=400, detail="teacher, grade, subject, file_uri, and item_id_prefix must be provided.")
 
     try:
+        # Construct the expected index display name
+        index_display_name = f"{teacher}_{grade}_{subject}_index"
+
+        # Find the index with the matching display name
+        indexes = aiplatform.MatchingEngineIndex.list(filter=f'display_name="{index_display_name}"')
+
+        if not indexes:
+            raise HTTPException(status_code=404, detail=f"Index with display name '{index_display_name}' not found. Please create the index first.")
+
+        # Assuming there's only one index with this display name
+        index = indexes[0]
+
+        # Find a deployed endpoint for the index
+        if not index.deployed_indexes:
+             raise HTTPException(status_code=404, detail=f"No deployed endpoint found for index '{index_display_name}'. Please deploy the index first.")
+
+        # Assuming the first deployed index is the one we want to use
+        deployed_index_id = index.deployed_indexes[0].id
+        index_endpoint_name = index.deployed_indexes[0].index_endpoint
+
+        # Initialize the deployed index endpoint
+        deployed_index_endpoint = matching_engine_index_endpoint.MatchingEngineIndexEndpoint(
+            index_endpoint_name=index_endpoint_name
+        )
+
         # Determine file type based on extension
         file_extension = os.path.splitext(file_uri)[1].lower()
 
@@ -183,15 +194,16 @@ async def generate_embedding(file_uri: str, item_id_prefix: str):
              raise HTTPException(status_code=500, detail="No datapoints prepared for indexing.")
 
         # 3. Upsert embeddings to the index
-        print(f"Upserting {len(datapoints)} datapoints to deployed index '{DEPLOYED_INDEX_ID}'...")
+        print(f"Upserting {len(datapoints)} datapoints to deployed index '{deployed_index_id}'...")
         # The upsert_embeddings method expects a list of IndexDatapoint objects or dicts
         deployed_index_endpoint.upsert_embeddings(datapoints)
         print("Upsert operation initiated.")
 
 
-        return {"message": f"Embeddings generated and upserted to Vector Search index endpoint '{VECTOR_STORE_ENDPOINT_ID}'.",
+        return {"message": f"Embeddings generated and upserted to Vector Search index endpoint '{index_endpoint_name}'.",
                 "num_embeddings": len(datapoints),
-                "file_type": file_extension}
+                "file_type": file_extension,
+                "index_display_name": index_display_name}
 
     except Exception as e:
         print(f"Detailed error in /generate_embedding/: {e}")
