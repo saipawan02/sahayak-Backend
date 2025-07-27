@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 import vertexai
 from vertexai.vision_models import MultiModalEmbeddingModel, Video, Image
-from google.cloud import storage, aiplatform_v1
+from google.cloud import storage
 from google.cloud import aiplatform # Correct import for higher-level client
 from dotenv import load_dotenv
 import fitz  # PyMuPDF
@@ -80,7 +80,7 @@ def get_multimodal_embeddings_from_pdf(pdf_uri: str):
         pdf_document = fitz.open(stream=pdf_content, filetype="pdf")
         logger.info(f"Processing PDF {pdf_uri} with {pdf_document.page_count} pages.")
 
-        for page_num in range(pdf_document.page_count)[:2]:
+        for page_num in range(pdf_document.page_count):
             page = pdf_document.load_page(page_num)
             page_text = page.get_text().strip()
 
@@ -203,8 +203,8 @@ def generate_embedding_task(teacher: str, grade: str, subject: str, file_name: s
             datapoint_id = f"{object_path}::{unique_id_part}",
             datapoints.append(
                 # Use aiplatform.MatchingEngineIndex.Datapoint for upserting
-                aiplatform_v1.IndexDatapoint(
-                    datapoint_id=f"{object_path}::{unique_id_part}",
+                aiplatform.MatchingEngineIndex.Datapoint(
+                    datapoint_id=datapoint_id,
                     feature_vector=embedding,
                 )
             )
