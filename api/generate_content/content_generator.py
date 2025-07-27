@@ -199,13 +199,7 @@ async def generate_content(
             )
             final_document = trans_response.translations[0].translated_text
 
-        return {
-            "final_document": final_document,
-            "language": language,
-            "intermediate_markdown": markdown_content,
-            "charts": chart_data,
-            "examples": example_data,
-        }
+        return final_document
 
     except Exception as e:
         print(f"Detailed error in /generate-content/: {e}")

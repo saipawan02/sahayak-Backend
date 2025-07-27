@@ -3,14 +3,13 @@ autopep8
 fastapi
 gunicorn==22.0.0
 Werkzeug==3.0.6
-fastapi
 uvicorn
 python-dotenv
 google-cloud-storage
 google-cloud-aiplatform
 google-generativeai
 pymupdf
-python-multipartgoogle-cloud-translate==3.13.0
-google-cloud-translatelangchain==0.2.1
+python-multipart
+google-cloud-translate==3.13.0
+langchain==0.2.1
 langchain-text-splitters==0.2.0
-langchain
