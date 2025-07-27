@@ -2,6 +2,7 @@ import os
 from fastapi import APIRouter, File, UploadFile, HTTPException, Query
 from google.cloud import storage
 from dotenv import load_dotenv
+from typing import List
 
 load_dotenv()
 
@@ -17,63 +18,49 @@ if not BUCKET_NAME:
 storage_client = storage.Client()
 bucket = storage_client.bucket(BUCKET_NAME)
 
-@router.post("/upload_video/")
-async def upload_video(
-    video_file: UploadFile = File(...),
+@router.post("/upload_files/")
+async def upload_files(
+    files: List[UploadFile] = File(...),
     teacher_name: str = Query(..., description="Name of the teacher."),
     grade: str = Query(..., description="Grade level."),
     subject: str = Query(..., description="Subject name.")
 ):
-    """Uploads a video file to Google Cloud Storage with folder structure <teacher_name>/<grade>/<subject>."""
-    try:
-        # Construct the GCS object path with the desired folder structure
-        object_path = f"{teacher_name}/{grade}/{subject}/{video_file.filename}"
+    """Uploads one or more files to Google Cloud Storage, handling them by extension."""
+    
+    uploaded_files_info = []
+    
+    for file in files:
+        try:
+            # Get the file extension
+            file_extension = file.filename.split('.')[-1].lower()
+            if not file_extension in ["mp4", "pdf"]:
+                raise HTTPException(status_code=400, detail=f"File type ._ {file_extension} not supported.")
 
-        # Upload the file to the specified bucket and path
-        blob = bucket.blob(object_path)
-        blob.upload_from_file(video_file.file)
+            # Construct the GCS object path
+            object_path = f"{teacher_name}/{grade}/{subject}/{file.filename}"
+            blob = bucket.blob(object_path)
 
-        gcs_uri = f"gs://{BUCKET_NAME}/{object_path}"
+            # Upload the file
+            file.file.seek(0) # Go to the beginning of the file
+            blob.upload_from_file(file.file)
 
-        # Important: You might want to return the structured GCS URI
-        # and potentially other metadata for indexing later.
-        return {"message": f"Video '{video_file.filename}' uploaded to '{gcs_uri}'.",
+            gcs_uri = f"gs://{BUCKET_NAME}/{object_path}"
+            
+            uploaded_files_info.append({
+                "filename": file.filename,
                 "gcs_uri": gcs_uri,
+                "content_type": file.content_type,
                 "teacher_name": teacher_name,
                 "grade": grade,
-                "subject": subject}
-    except Exception as e:
-        print(f"Error uploading video: {e}")
-        raise HTTPException(status_code=500, detail=f"Error uploading video: {e}")
+                "subject": subject
+            })
 
-@router.post("/upload_pdf/")
-async def upload_pdf(
-    pdf_file: UploadFile = File(...),
-    teacher_name: str = Query(..., description="Name of the teacher."),
-    grade: str = Query(..., description="Grade level."),
-    subject: str = Query(..., description="Subject name.")
-):
-    """Uploads a PDF file to Google Cloud Storage with folder structure <teacher_name>/<grade>/<subject>."""
-    try:
-        # Construct the GCS object path with the desired folder structure
-        object_path = f"{teacher_name}/{grade}/{subject}/{pdf_file.filename}"
-
-        # Upload the file to the specified bucket and path
-        blob = bucket.blob(object_path)
-        blob.upload_from_file(pdf_file.file)
-
-        gcs_uri = f"gs://{BUCKET_NAME}/{object_path}"
-
-        # Important: You might want to return the structured GCS URI
-        # and potentially other metadata for indexing later.
-        return {"message": f"PDF '{pdf_file.filename}' uploaded to '{gcs_uri}'.",
-                "gcs_uri": gcs_uri,
-                "teacher_name": teacher_name,
-                "grade": grade,
-                "subject": subject}
-    except Exception as e:
-        print(f"Error uploading PDF: {e}")
-        raise HTTPException(status_code=500, detail=f"Error uploading PDF: {e}")
+        except Exception as e:
+            print(f"Error uploading file {file.filename}: {e}")
+            # Continue to next file if one fails, or raise immediately
+            raise HTTPException(status_code=500, detail=f"Error uploading file {file.filename}: {e}")
+            
+    return {"uploaded_files": uploaded_files_info}
 
 @router.get("/list_files/")
 async def list_files(
@@ -85,7 +72,7 @@ async def list_files(
     try:
         prefix = f"{teacher_name}/{grade}/{subject}/"
         blobs = bucket.list_blobs(prefix=prefix)
-        file_list = [blob.name.split("/")[-1] for blob in blobs]
+        file_list = [blob.name for blob in blobs]
         return {"files": file_list}
     except Exception as e:
         print(f"Error listing files: {e}")

@@ -51,18 +51,24 @@ def _create_and_deploy_index_task(
                 approximate_neighbors_count=150,
                 leaf_node_embedding_count=500,
                 leaf_nodes_to_search_percent=7,
-                index_update_method="BATCH_UPDATE",
+                index_update_method="STREAM_UPDATE",
                 distance_measure_type=distance_measure_type
             )
 
             # Wait for index creation to complete
             print("Background task: Waiting for index creation to complete...")
-            index = index_operation.result()
+
+            while True:
+                indexs = aiplatform.MatchingEngineIndex.list(filter=f'display_name="{index_display_name}"')
+                if indexs is not None:
+                    index = indexs[0]
+                    break
             print(f"Background task: Index created: {index.resource_name}")
 
 
         # 2. Find or create the index endpoint
         print(f"Background task: Finding or creating index endpoint: {endpoint_display_name}")
+
         endpoints = aiplatform.MatchingEngineIndexEndpoint.list(filter=f'display_name="{endpoint_display_name}"')
         if endpoints:
             index_endpoint = endpoints[0]
@@ -74,12 +80,12 @@ def _create_and_deploy_index_task(
                 public_endpoint_enabled=True,
             )
 
-
             while True:
-                index_endpoints = aiplatform.MatchingEngineIndex.list(filter=f'display_name="{index_display_name}"')
-                if index_endpoint is not None:
-                    index_endpoint = index_endpoint[0]
+                index_endpoints = aiplatform.MatchingEngineIndexEndpoint.list(filter=f'display_name="{index_display_name}"')
+                if index_endpoints is not None:
+                    index_endpoint = index_endpoints[0]
                     break
+
                 print("Background task: Waiting for index to be created...")
                 time.sleep(5)
             
