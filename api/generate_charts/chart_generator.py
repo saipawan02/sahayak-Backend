@@ -15,7 +15,7 @@ genai.configure(api_key=gemini_api_key)
 # Use a current, valid model name
 generation_model = genai.GenerativeModel('gemini-2.5-pro')
 
-def generate_charts_from_markdown(markdown_text: str) -> dict:
+def generate_charts_from_html(markdown_text: str) -> dict:
     """
     Analyzes markdown text and generates a JSON object with Mermaid.js commands if charts are suitable.
     """

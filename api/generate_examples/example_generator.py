@@ -15,7 +15,7 @@ genai.configure(api_key=gemini_api_key)
 # Use a current, valid model name
 generation_model = genai.GenerativeModel('gemini-2.5-pro')
 
-def generate_examples_from_markdown(markdown_text: str) -> dict:
+def generate_examples_from_html(markdown_text: str) -> dict:
     """
     Analyzes markdown text and generates a list of relevant examples if needed.
     """

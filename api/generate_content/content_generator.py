@@ -2,20 +2,19 @@ import os
 from fastapi import APIRouter, HTTPException, File, UploadFile
 import vertexai
 from vertexai.vision_models import MultiModalEmbeddingModel
-from google.cloud import aiplatform_v1, storage, translate
+from google.cloud import aiplatform_v1, storage, translate, aiplatform
 from google.cloud.aiplatform.matching_engine import matching_engine_index_endpoint
 import google.generativeai as genai
 from dotenv import load_dotenv
 import json
 from typing import List, Optional
-from api.generate_charts.chart_generator import generate_charts_from_markdown
-from api.generate_examples.example_generator import generate_examples_from_markdown
-import logging
+from api.generate_charts.chart_generator import generate_charts_from_html
+from api.generate_examples.example_generator import generate_examples_from_html
+import traceback
 
 load_dotenv()
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT_ID")
@@ -35,33 +34,22 @@ translate_client = translate.TranslationServiceClient()
 
 # --- Models ---
 embedding_model = MultiModalEmbeddingModel.from_pretrained("multimodalembedding@001")
-generation_model = genai.GenerativeModel('gemini-1.5-pro-preview-0409')
+generation_model = genai.GenerativeModel('gemini-2.0-flash')
 
 
 def retrieve_original_content(item_id: str) -> str:
-    """
-    Retrieves the original content of a file from GCS based on a structured item_id.
-    The item_id is expected to be in the format: 'path/to/your/file.pdf::chunk_info'
-    """
+    print(f"Attempting to retrieve content for item ID: {item_id} from bucket {BUCKET_NAME}")
+    object_path = item_id
     try:
-        # Split the ID to get the actual GCS object path
-        object_path = item_id.split("::")[0]
-        logger.info(f"Retrieving content for object path: {object_path}")
-        
         blob = bucket.blob(object_path)
         if blob.exists():
-            # For simplicity, we download the whole text. 
-            # A more advanced implementation could use the chunk_info part of the ID
-            # to extract a specific portion of the text.
             content = blob.download_as_text()
-            logger.info(f"Successfully retrieved content for {object_path}")
             return content
         else:
-            logger.error(f"Blob not found at path: {object_path}")
-            return f"[Content for item ID {item_id} not found. Path {object_path} is invalid.]"
+            return f"Content for item ID {item_id}: [Original content not found]"
     except Exception as e:
-        logger.error(f"Error retrieving content for item ID {item_id}: {e}", exc_info=True)
-        return f"[Error retrieving content for item ID {item_id}.]"
+        print(f"Error retrieving content for item ID {item_id} from GCS: {e}")
+        return f"Content for item ID {item_id}: [Error retrieving content]"
 
 @router.post("/translate/")
 async def translate_text(strs_to_translate: List[str], target_language_code: str):
@@ -89,8 +77,8 @@ async def generate_content(
     grade: str,
     subject: str,
     language: str = "en",
-    image_files: Optional[List[UploadFile]] = File(None),
-    audio_file: Optional[UploadFile] = File(None),
+    image_file: Optional[UploadFile] | None = None,
+    audio_file: Optional[UploadFile] | None = None,
 ):
     """
     Generates a comprehensive document based on a topic, with optional multimodal inputs.
@@ -100,75 +88,79 @@ async def generate_content(
         raise HTTPException(status_code=400, detail="topic, teacher, grade, and subject must be provided.")
 
     try:
+        # 1. Load the index dynamically
         teacher_clean = teacher.replace(" ", "_").lower()
         endpoint_display_name = f"{teacher_clean}_{grade}_{subject}_index"
         
-        logger.info(f"Loading Vector Search endpoint: {endpoint_display_name}")
-        endpoints = aiplatform.IndexEndpoint.list(filter=f'display_name="{endpoint_display_name}"')
+        # Use aiplatform.MatchingEngineIndexEndpoint.list to find the endpoint
+        endpoints = aiplatform.MatchingEngineIndexEndpoint.list(filter=f'display_name="{endpoint_display_name}"')
         if not endpoints:
             raise HTTPException(
                 status_code=404,
-                detail=f"Vector Search endpoint '{endpoint_display_name}' not found.",
+                detail=f"Vector Search endpoint '{endpoint_display_name}' not found. Please create it first.",
             )
         
-        index_endpoint = endpoints[0]
+        # Get the resource name of the endpoint
+        endpoint_resource_name = endpoints[0].resource_name
+        print(f"Found endpoint resource name: {endpoint_resource_name}")
+
+        # Initialize the MatchingEngineIndexEndpoint with the resource name
+        # Set public_endpoint=True if it's a public endpoint
+        # If it's a private endpoint, ensure your networking is correctly configured
+        index_endpoint = aiplatform.MatchingEngineIndexEndpoint(index_endpoint_name=endpoint_resource_name) 
+
         if not index_endpoint.deployed_indexes:
             raise HTTPException(
                 status_code=404,
                 detail=f"No indexes are deployed to this endpoint: {endpoint_display_name}"
             )
         deployed_index_id = index_endpoint.deployed_indexes[0].id
-        logger.info(f"Found deployed index ID: {deployed_index_id}")
+        print(f"Using deployed index ID: {deployed_index_id}")
 
+        # 2. Prepare multimodal prompt
         prompt_parts = [f"Generate a comprehensive document about '{topic}'. "]
-        if image_files:
-            for image_file in image_files:
-                image_data = image_file.file.read()
-                prompt_parts.append({"mime_type": image_file.content_type, "data": image_data})
+
+        if image_file:
+            image_file.file.seek(0)
+            image_data = image_file.file.read()
+            prompt_parts.append({"mime_type": image_file.content_type, "data": image_data})
+
         if audio_file:
+            audio_file.file.seek(0)
             audio_data = audio_file.file.read()
             prompt_parts.append({"mime_type": audio_file.content_type, "data": audio_data})
 
-        logger.info("Generating query embedding...")
-        query_embeddings_response = embedding_model.get_embeddings(instances=[{"text": topic}])
-        query_vector = query_embeddings_response.text_embeddings[0].embedding
+
+        # 3. Retrieve information from Vector Search
+        query_embeddings_response = embedding_model.get_embeddings(contextual_text=topic)
+        query_vector = query_embeddings_response.text_embedding
         
-        logger.info(f"Querying endpoint '{endpoint_display_name}'...")
         retrieval_results = index_endpoint.find_neighbors(
             queries=[query_vector],
             deployed_index_id=deployed_index_id,
             num_neighbors=10
         )
-        
-        context = "
-
-Use the following retrieved information as a knowledge base:
-"
-        if retrieval_results and retrieval_results[0].neighbors:
-            logger.info(f"Retrieved {len(retrieval_results[0].neighbors)} neighbors.")
-            for neighbor in retrieval_results[0].neighbors:
-                # The neighbor.id now contains the full path to the original file
+        print(retrieval_results)
+        context = "Use the following retrieved information as a knowledge base:"
+        if retrieval_results and retrieval_results[0]:
+            for i, neighbor in enumerate(retrieval_results[0]):
                 original_content = retrieve_original_content(neighbor.id)
-                context += f"## Source: {neighbor.id.split('::')[0]}
-"
-                context += f"{original_content}
-
-"
+                context += f"## Source Document/Segment {i+1} (ID: {neighbor.id})"
+                context += f"{original_content}"
         else:
-            logger.info("No relevant information found in the vector database.")
             context += "No relevant information was found in the knowledge base."
         
         prompt_parts.append(context)
 
-        logger.info("Generating initial markdown content...")
+        # 4. Generate initial content
         initial_response = generation_model.generate_content(prompt_parts)
         markdown_content = initial_response.text
 
-        logger.info("Generating charts and examples...")
+        # 5. Generate charts and examples
         chart_data = generate_charts_from_markdown(markdown_content)
         example_data = generate_examples_from_markdown(markdown_content)
 
-        logger.info("Generating final polished document...")
+        # 6. Generate the final, polished document in English
         final_prompt = f"""
         You are an expert technical writer. Your task is to combine the following pieces of information into a single, cohesive, and well-structured markdown document.
 
@@ -192,9 +184,9 @@ Use the following retrieved information as a knowledge base:
         final_response = generation_model.generate_content(final_prompt)
         final_document_en = final_response.text
 
+        # 7. Translate the final document if a different language is requested
         final_document = final_document_en
         if language.lower() != "en":
-            logger.info(f"Translating final document to {language}...")
             parent = f"projects/{PROJECT_ID}/locations/{REGION}"
             trans_response = translate_client.translate_text(
                 request={
@@ -205,16 +197,10 @@ Use the following retrieved information as a knowledge base:
                 }
             )
             final_document = trans_response.translations[0].translated_text
-            logger.info("Translation complete.")
 
-        return {
-            "final_document": final_document,
-            "language": language,
-            "intermediate_markdown": markdown_content,
-            "charts": chart_data,
-            "examples": example_data,
-        }
+        return final_document
 
     except Exception as e:
-        logger.error(f"An unexpected error occurred in generate_content: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="An unexpected error occurred during content generation.")
+        print(f"Detailed error in /generate-content/: {e}")
+        print(traceback.print_exc())
+        raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
