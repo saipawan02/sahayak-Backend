@@ -38,7 +38,6 @@ generation_model = genai.GenerativeModel('gemini-2.0-flash')
 
 
 def retrieve_original_content(item_id: str) -> str:
-    print(f"Attempting to retrieve content for item ID: {item_id} from bucket {BUCKET_NAME}")
     object_path = item_id
     try:
         blob = bucket.blob(object_path)
@@ -157,8 +156,8 @@ async def generate_content(
         markdown_content = initial_response.text
 
         # 5. Generate charts and examples
-        chart_data = generate_charts_from_markdown(markdown_content)
-        example_data = generate_examples_from_markdown(markdown_content)
+        chart_data = generate_charts_from_html(markdown_content)
+        example_data = generate_examples_from_html(markdown_content)
 
         # 6. Generate the final, polished document in English
         final_prompt = f"""
